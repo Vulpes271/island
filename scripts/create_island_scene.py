@@ -30,6 +30,7 @@ GLB_PATH = OUTPUT_DIR / "island_two_villages.glb"
 ISLAND_X_RADIUS = 9.4
 ISLAND_Y_RADIUS = 6.8
 BEACH_START = 0.78
+COLLECTIONS = {}
 
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -41,6 +42,10 @@ def smoothstep(edge0: float, edge1: float, value: float) -> float:
         return 0.0
     t = clamp((value - edge0) / (edge1 - edge0))
     return t * t * (3.0 - 2.0 * t)
+
+
+def angle_delta(a: float, b: float) -> float:
+    return math.atan2(math.sin(a - b), math.cos(a - b))
 
 
 def create_material(name: str, color, roughness: float = 0.85, metallic: float = 0.0):
@@ -60,14 +65,43 @@ def create_material(name: str, color, roughness: float = 0.85, metallic: float =
     return mat
 
 
+def ensure_collection(name: str, parent_name: str | None = None):
+    """Create a logical collection once and return it."""
+    if name in COLLECTIONS:
+        return COLLECTIONS[name]
+
+    collection = bpy.data.collections.get(name) or bpy.data.collections.new(name)
+    parent = bpy.context.scene.collection if parent_name is None else ensure_collection(parent_name)
+    if collection.name not in [child.name for child in parent.children]:
+        parent.children.link(collection)
+    COLLECTIONS[name] = collection
+    return collection
+
+
+def link_to_collection(obj, collection_name: str | None):
+    if not collection_name:
+        return obj
+    collection = ensure_collection(collection_name)
+    if obj.name not in collection.objects:
+        collection.objects.link(obj)
+    return obj
+
+
+def create_scene_collections():
+    for name in ("Island", "Village_1", "Village_2", "Boats", "Roads", "Trees", "Props", "Interiors"):
+        ensure_collection(name)
+
+
 def boundary_factor(theta: float) -> float:
     """Organic outline multiplier used by both terrain and object placement."""
+    southeast_cove = -0.18 * math.exp(-((angle_delta(theta, -0.62) / 0.24) ** 2))
     return (
         1.0
         + 0.14 * math.sin(theta * 3.0 + 0.4)
         + 0.09 * math.sin(theta * 5.0 - 1.1)
         + 0.06 * math.sin(theta * 8.0 + 2.0)
         + 0.035 * math.cos(theta * 11.0 - 0.7)
+        + southeast_cove
     )
 
 
@@ -114,17 +148,22 @@ def local_to_world(origin, rotation_z: float, point):
     )
 
 
-def add_box(name: str, location, dimensions, material, rotation_z: float = 0.0):
+def add_box(name: str, location, dimensions, material, rotation_z: float = 0.0, collection: str | None = None):
     bpy.ops.mesh.primitive_cube_add(size=1, location=location, rotation=(0.0, 0.0, rotation_z))
     obj = bpy.context.object
     obj.name = name
     obj.dimensions = dimensions
     if material:
         obj.data.materials.append(material)
+    link_to_collection(obj, collection)
     return obj
 
 
-def create_roof(name: str, origin, rotation_z: float, width: float, depth: float, wall_height: float, roof_height: float, material, style: str = "gable"):
+def add_local_box(name: str, origin, rotation_z: float, local_center, dimensions, material, collection: str | None = None):
+    return add_box(name, local_to_world(origin, rotation_z, local_center), dimensions, material, rotation_z, collection)
+
+
+def create_roof(name: str, origin, rotation_z: float, width: float, depth: float, wall_height: float, roof_height: float, material, style: str = "gable", collection: str | None = None):
     eave = 0.12
     w = width + eave * 2.0
     d = depth + eave * 2.0
@@ -187,6 +226,7 @@ def create_roof(name: str, origin, rotation_z: float, width: float, depth: float
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.collection.objects.link(obj)
     obj.data.materials.append(material)
+    link_to_collection(obj, collection)
     return obj
 
 
@@ -290,6 +330,7 @@ def create_tree(name: str, location, trunk_material, leaves_material, scale: flo
     trunk = bpy.context.object
     trunk.name = f"{name} Trunk"
     trunk.data.materials.append(trunk_material)
+    link_to_collection(trunk, "Trees")
 
     for index, z_offset in enumerate((trunk_height + leaf_height * 0.35, trunk_height + leaf_height * 0.78)):
         bpy.ops.mesh.primitive_cone_add(
@@ -303,6 +344,7 @@ def create_tree(name: str, location, trunk_material, leaves_material, scale: flo
         leaves = bpy.context.object
         leaves.name = f"{name} Leaves {index + 1}"
         leaves.data.materials.append(leaves_material)
+        link_to_collection(leaves, "Trees")
 
 
 def create_road_or_path(name: str, points, width: float, material, z_offset: float = 0.055):
@@ -337,10 +379,11 @@ def create_road_or_path(name: str, points, width: float, material, z_offset: flo
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.collection.objects.link(obj)
     obj.data.materials.append(material)
+    link_to_collection(obj, "Roads")
     return obj
 
 
-def create_flat_patch(name: str, center, width: float, depth: float, material, rotation_z: float = 0.0, z_offset: float = 0.07, corners: int = 4):
+def create_flat_patch(name: str, center, width: float, depth: float, material, rotation_z: float = 0.0, z_offset: float = 0.07, corners: int = 4, collection: str = "Roads"):
     """Create a terrain-hugging patch for plazas, yards, and sand transitions."""
     if corners == 8:
         local_points = []
@@ -366,29 +409,32 @@ def create_flat_patch(name: str, center, width: float, depth: float, material, r
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.collection.objects.link(obj)
     obj.data.materials.append(material)
+    link_to_collection(obj, collection)
     return obj
 
 
-def create_prop_crate(name: str, location, wood_material, dark_material, scale: float = 1.0, rotation_z: float = 0.0):
+def create_prop_crate(name: str, location, wood_material, dark_material, scale: float = 1.0, rotation_z: float = 0.0, collection: str = "Props"):
     size = 0.28 * scale
-    add_box(f"{name} Box", (location[0], location[1], location[2] + size / 2.0), (size, size, size), wood_material, rotation_z)
-    add_box(f"{name} Cross Slat A", (location[0], location[1], location[2] + size * 0.55), (size * 1.08, 0.035 * scale, 0.035 * scale), dark_material, rotation_z + math.radians(32))
-    add_box(f"{name} Cross Slat B", (location[0], location[1], location[2] + size * 0.55), (size * 1.08, 0.035 * scale, 0.035 * scale), dark_material, rotation_z - math.radians(32))
+    add_box(f"{name} Box", (location[0], location[1], location[2] + size / 2.0), (size, size, size), wood_material, rotation_z, collection)
+    add_box(f"{name} Cross Slat A", (location[0], location[1], location[2] + size * 0.55), (size * 1.08, 0.035 * scale, 0.035 * scale), dark_material, rotation_z + math.radians(32), collection)
+    add_box(f"{name} Cross Slat B", (location[0], location[1], location[2] + size * 0.55), (size * 1.08, 0.035 * scale, 0.035 * scale), dark_material, rotation_z - math.radians(32), collection)
 
 
-def create_prop_barrel(name: str, location, wood_material, band_material, scale: float = 1.0):
+def create_prop_barrel(name: str, location, wood_material, band_material, scale: float = 1.0, collection: str = "Props"):
     radius = 0.13 * scale
     height = 0.34 * scale
     bpy.ops.mesh.primitive_cylinder_add(vertices=8, radius=radius, depth=height, location=(location[0], location[1], location[2] + height / 2.0))
     barrel = bpy.context.object
     barrel.name = f"{name} Barrel"
     barrel.data.materials.append(wood_material)
+    link_to_collection(barrel, collection)
 
     for z_factor in (0.28, 0.72):
         bpy.ops.mesh.primitive_cylinder_add(vertices=8, radius=radius * 1.04, depth=0.035 * scale, location=(location[0], location[1], location[2] + height * z_factor))
         band = bpy.context.object
         band.name = f"{name} Barrel Band"
         band.data.materials.append(band_material)
+        link_to_collection(band, collection)
 
 
 def create_prop_woodpile(name: str, location, wood_material, scale: float = 1.0, rotation_z: float = 0.0):
@@ -495,55 +541,510 @@ def create_well(name: str, center, stone_material, wood_material, roof_material,
     bucket.data.materials.append(bucket_material)
 
 
+def create_window_detail(name: str, origin, rotation_z: float, local_center, width: float, height: float, materials, wall_side: str, collection: str):
+    """Add a pane, frame, shutters, and sill to a window opening."""
+    pane_mat = materials["window"]
+    wood_mat = materials["dark_wood"]
+    flower_mat = materials.get("flower", materials["garden_green"])
+
+    if wall_side in {"front", "back"}:
+        pane_dims = (width, 0.028, height)
+        frame_h_dims = (width + 0.11, 0.04, 0.045)
+        frame_v_dims = (0.045, 0.04, height + 0.1)
+        sill_dims = (width + 0.16, 0.08, 0.045)
+        add_local_box(f"{name} Glass Pane", origin, rotation_z, local_center, pane_dims, pane_mat, collection)
+        for zoff in (-height / 2.0 - 0.035, height / 2.0 + 0.035):
+            add_local_box(f"{name} Window Frame Horizontal", origin, rotation_z, (local_center[0], local_center[1], local_center[2] + zoff), frame_h_dims, wood_mat, collection)
+        for xoff in (-width / 2.0 - 0.035, width / 2.0 + 0.035):
+            add_local_box(f"{name} Window Frame Vertical", origin, rotation_z, (local_center[0] + xoff, local_center[1], local_center[2]), frame_v_dims, wood_mat, collection)
+            add_local_box(f"{name} Shutter", origin, rotation_z, (local_center[0] + xoff * 1.35, local_center[1], local_center[2]), (0.07, 0.035, height * 0.9), wood_mat, collection)
+        add_local_box(f"{name} Flower Box", origin, rotation_z, (local_center[0], local_center[1] - 0.02, local_center[2] - height / 2.0 - 0.12), sill_dims, wood_mat, collection)
+        add_local_box(f"{name} Flowers", origin, rotation_z, (local_center[0], local_center[1] - 0.03, local_center[2] - height / 2.0 - 0.075), (width * 0.8, 0.045, 0.055), flower_mat, collection)
+    else:
+        pane_dims = (0.028, width, height)
+        frame_h_dims = (0.04, width + 0.11, 0.045)
+        frame_v_dims = (0.04, 0.045, height + 0.1)
+        add_local_box(f"{name} Glass Pane", origin, rotation_z, local_center, pane_dims, pane_mat, collection)
+        for zoff in (-height / 2.0 - 0.035, height / 2.0 + 0.035):
+            add_local_box(f"{name} Window Frame Horizontal", origin, rotation_z, (local_center[0], local_center[1], local_center[2] + zoff), frame_h_dims, wood_mat, collection)
+        for yoff in (-width / 2.0 - 0.035, width / 2.0 + 0.035):
+            add_local_box(f"{name} Window Frame Vertical", origin, rotation_z, (local_center[0], local_center[1] + yoff, local_center[2]), frame_v_dims, wood_mat, collection)
+
+
+def create_front_wall_with_openings(name: str, origin, rotation_z: float, width: float, depth: float, wall_height: float, wall_material, openings, collection: str):
+    """Build a front wall from pieces so door/window placements are real gaps."""
+    thickness = 0.08
+    y = -depth / 2.0
+    edges = [-width / 2.0]
+    for opening in openings:
+        edges.extend([opening["x"] - opening["w"] / 2.0, opening["x"] + opening["w"] / 2.0])
+    edges.append(width / 2.0)
+    edges = sorted(clamp(edge, -width / 2.0, width / 2.0) for edge in edges)
+
+    for index in range(len(edges) - 1):
+        span = edges[index + 1] - edges[index]
+        midpoint = (edges[index] + edges[index + 1]) / 2.0
+        inside_opening = any((opening["x"] - opening["w"] / 2.0) < midpoint < (opening["x"] + opening["w"] / 2.0) for opening in openings)
+        if span > 0.035 and not inside_opening:
+            x = (edges[index] + edges[index + 1]) / 2.0
+            add_local_box(f"{name} Front Wall Span {index}", origin, rotation_z, (x, y, wall_height / 2.0), (span, thickness, wall_height), wall_material, collection)
+
+    for index, opening in enumerate(openings):
+        x = opening["x"]
+        w = opening["w"]
+        bottom = opening["bottom"]
+        top = opening["bottom"] + opening["h"]
+        if bottom > 0.05:
+            add_local_box(f"{name} Front Wall Below Opening {index}", origin, rotation_z, (x, y, bottom / 2.0), (w, thickness, bottom), wall_material, collection)
+        if top < wall_height - 0.04:
+            add_local_box(f"{name} Front Wall Above Opening {index}", origin, rotation_z, (x, y, (top + wall_height) / 2.0), (w, thickness, wall_height - top), wall_material, collection)
+
+
+def create_table(name: str, origin, rotation_z: float, local_pos, materials, collection: str, size=(0.58, 0.38, 0.08)):
+    wood = materials["wood"]
+    add_local_box(f"{name} Table Top", origin, rotation_z, (local_pos[0], local_pos[1], local_pos[2] + 0.32), size, wood, collection)
+    for xoff in (-size[0] * 0.38, size[0] * 0.38):
+        for yoff in (-size[1] * 0.34, size[1] * 0.34):
+            add_local_box(f"{name} Table Leg", origin, rotation_z, (local_pos[0] + xoff, local_pos[1] + yoff, local_pos[2] + 0.17), (0.045, 0.045, 0.3), wood, collection)
+
+
+def create_chair(name: str, origin, rotation_z: float, local_pos, materials, collection: str, angle: float = 0.0):
+    wood = materials["wood"]
+    rot = rotation_z + angle
+    world = local_to_world(origin, rotation_z, local_pos)
+    add_box(f"{name} Seat", (world[0], world[1], world[2] + 0.22), (0.22, 0.22, 0.05), wood, rot, collection)
+    back = local_to_world(origin, rotation_z, (local_pos[0], local_pos[1] + 0.1, local_pos[2] + 0.38))
+    add_box(f"{name} Back", back, (0.22, 0.045, 0.32), wood, rot, collection)
+
+
+def create_bed(name: str, origin, rotation_z: float, local_pos, materials, collection: str, angle: float = 0.0, double: bool = False):
+    rot = rotation_z + angle
+    length = 0.72 if not double else 0.86
+    width = 0.42 if not double else 0.62
+    world = local_to_world(origin, rotation_z, local_pos)
+    add_box(f"{name} Bed Frame", (world[0], world[1], world[2] + 0.16), (width, length, 0.14), materials["wood"], rot, collection)
+    add_box(f"{name} Mattress", (world[0], world[1], world[2] + 0.26), (width * 0.9, length * 0.82, 0.08), materials["fabric"], rot, collection)
+    pillow = local_to_world(origin, rotation_z, (local_pos[0], local_pos[1] + length * 0.28, local_pos[2] + 0.34))
+    add_box(f"{name} Pillow", pillow, (width * 0.58, 0.16, 0.055), materials["pillow"], rot, collection)
+
+
+def create_chest(name: str, origin, rotation_z: float, local_pos, materials, collection: str, scale: float = 1.0):
+    add_local_box(f"{name} Storage Chest", origin, rotation_z, (local_pos[0], local_pos[1], local_pos[2] + 0.14 * scale), (0.34 * scale, 0.22 * scale, 0.24 * scale), materials["dark_wood"], collection)
+    add_local_box(f"{name} Chest Lid", origin, rotation_z, (local_pos[0], local_pos[1], local_pos[2] + 0.27 * scale), (0.38 * scale, 0.24 * scale, 0.045 * scale), materials["wood"], collection)
+
+
+def create_shelf(name: str, origin, rotation_z: float, local_pos, materials, collection: str, width: float = 0.62):
+    add_local_box(f"{name} Shelf Back", origin, rotation_z, (local_pos[0], local_pos[1], local_pos[2] + 0.48), (width, 0.045, 0.52), materials["dark_wood"], collection)
+    for zoff in (0.3, 0.5, 0.7):
+        add_local_box(f"{name} Shelf Board", origin, rotation_z, (local_pos[0], local_pos[1] - 0.025, local_pos[2] + zoff), (width, 0.16, 0.035), materials["wood"], collection)
+    for index, xoff in enumerate((-0.22, 0.0, 0.2), start=1):
+        bpy.ops.mesh.primitive_cylinder_add(vertices=8, radius=0.04, depth=0.08, location=local_to_world(origin, rotation_z, (local_pos[0] + xoff, local_pos[1] - 0.08, local_pos[2] + 0.76)))
+        pot = bpy.context.object
+        pot.name = f"{name} Pot {index}"
+        pot.data.materials.append(materials["clay"])
+        link_to_collection(pot, collection)
+
+
+def create_fireplace(name: str, origin, rotation_z: float, local_pos, materials, collection: str, stove: bool = False):
+    if stove:
+        add_local_box(f"{name} Iron Stove", origin, rotation_z, (local_pos[0], local_pos[1], local_pos[2] + 0.22), (0.3, 0.25, 0.28), materials["black"], collection)
+        add_local_box(f"{name} Stove Pipe", origin, rotation_z, (local_pos[0], local_pos[1], local_pos[2] + 0.58), (0.1, 0.1, 0.48), materials["black"], collection)
+    else:
+        add_local_box(f"{name} Stone Hearth", origin, rotation_z, (local_pos[0], local_pos[1], local_pos[2] + 0.16), (0.48, 0.18, 0.32), materials["rock"], collection)
+        add_local_box(f"{name} Chimney Breast", origin, rotation_z, (local_pos[0], local_pos[1] + 0.02, local_pos[2] + 0.5), (0.36, 0.14, 0.58), materials["rock"], collection)
+        add_local_box(f"{name} Fire Glow", origin, rotation_z, (local_pos[0], local_pos[1] - 0.08, local_pos[2] + 0.14), (0.22, 0.04, 0.14), materials["fire"], collection)
+
+
+def create_house_base(
+    name: str,
+    center,
+    rotation_z: float,
+    width: float,
+    depth: float,
+    wall_height: float,
+    roof_height: float,
+    wall_material,
+    roof_material,
+    materials,
+    collection: str,
+    roof_style: str = "gable",
+    door_offset: float = 0.0,
+    door_width: float = 0.34,
+    door_height: float = 0.68,
+    front_windows: int = 2,
+    side_extension: bool = False,
+    chimney: bool = False,
+    porch: bool = True,
+):
+    """Build a furnished-house-ready shell with segmented walls and separated roof."""
+    origin = (center[0], center[1], island_height(center[0], center[1]) + 0.09)
+    foundation_h = 0.16
+    wall_z = foundation_h
+    wall_origin = (origin[0], origin[1], origin[2] + wall_z)
+
+    add_local_box(f"{name} Interior Floor", origin, rotation_z, (0.0, 0.0, 0.02), (width, depth, 0.04), materials["floor"], collection)
+    add_local_box(f"{name} Stone Foundation", origin, rotation_z, (0.0, 0.0, foundation_h / 2.0), (width + 0.16, depth + 0.16, foundation_h), materials["rock"], collection)
+
+    openings = [{"x": door_offset * width, "w": door_width, "bottom": 0.0, "h": door_height}]
+    window_xs = [-width * 0.28, width * 0.28] if front_windows == 2 else [-width * 0.33, 0.0, width * 0.33]
+    for x in window_xs[:front_windows]:
+        if abs(x - door_offset * width) > door_width * 0.78:
+            openings.append({"x": x, "w": 0.28, "bottom": 0.38, "h": 0.28})
+
+    create_front_wall_with_openings(f"{name}", wall_origin, rotation_z, width, depth, wall_height, wall_material, openings, collection)
+    add_local_box(f"{name} Back Wall", wall_origin, rotation_z, (0.0, depth / 2.0, wall_height / 2.0), (width, 0.08, wall_height), wall_material, collection)
+    add_local_box(f"{name} Left Wall", wall_origin, rotation_z, (-width / 2.0, 0.0, wall_height / 2.0), (0.08, depth, wall_height), wall_material, collection)
+    add_local_box(f"{name} Right Wall", wall_origin, rotation_z, (width / 2.0, 0.0, wall_height / 2.0), (0.08, depth, wall_height), wall_material, collection)
+
+    door_center = (door_offset * width, -depth / 2.0 - 0.045, door_height / 2.0)
+    add_local_box(f"{name} Wooden Front Door", wall_origin, rotation_z, door_center, (door_width * 0.88, 0.045, door_height * 0.92), materials["door"], collection)
+    add_local_box(f"{name} Door Handle", wall_origin, rotation_z, (door_center[0] + door_width * 0.28, door_center[1] - 0.025, door_center[2]), (0.035, 0.03, 0.035), materials["metal"], collection)
+
+    for index, opening in enumerate(openings[1:], start=1):
+        create_window_detail(
+            f"{name} Front Window {index}",
+            wall_origin,
+            rotation_z,
+            (opening["x"], -depth / 2.0 - 0.055, opening["bottom"] + opening["h"] / 2.0),
+            opening["w"] * 0.84,
+            opening["h"] * 0.86,
+            materials,
+            "front",
+            collection,
+        )
+    create_window_detail(f"{name} Side Window Left", wall_origin, rotation_z, (-width / 2.0 - 0.05, -depth * 0.15, 0.66), 0.26, 0.26, materials, "side", collection)
+    create_window_detail(f"{name} Side Window Right", wall_origin, rotation_z, (width / 2.0 + 0.05, depth * 0.12, 0.66), 0.26, 0.26, materials, "side", collection)
+
+    roof = create_roof(f"{name} Separated Inspectable Roof", origin, rotation_z, width + 0.16, depth + 0.16, wall_z + wall_height, roof_height, roof_material, roof_style, collection)
+    roof["is_removable_roof"] = True
+
+    if porch:
+        add_local_box(f"{name} Porch Step", origin, rotation_z, (door_offset * width, -depth / 2.0 - 0.36, 0.09), (0.66, 0.36, 0.12), materials["wood"], collection)
+    if chimney:
+        add_local_box(f"{name} Chimney", origin, rotation_z, (width * 0.28, depth * 0.15, wall_z + wall_height + roof_height * 0.72), (0.18, 0.18, 0.62), materials["rock"], collection)
+    if side_extension:
+        add_local_box(f"{name} Side Extension", origin, rotation_z, (width / 2.0 + 0.38, -depth * 0.1, 0.32), (0.68, depth * 0.55, 0.48), wall_material, collection)
+        ext_origin = local_to_world(origin, rotation_z, (width / 2.0 + 0.38, -depth * 0.1, 0.0))
+        create_roof(f"{name} Side Extension Roof", ext_origin, rotation_z, 0.78, depth * 0.65, 0.56, 0.2, roof_material, "shed", collection)
+
+    return {"origin": origin, "wall_origin": wall_origin, "width": width, "depth": depth, "wall_height": wall_height, "rotation": rotation_z}
+
+
+def furnish_house_interior(name: str, house, materials, profile: str, collection: str = "Interiors"):
+    """Give every house readable domestic interior furniture and owner-specific clutter."""
+    origin = house["origin"]
+    rot = house["rotation"]
+    width = house["width"]
+    depth = house["depth"]
+
+    create_table(f"{name} Main Room", origin, rot, (-width * 0.08, -depth * 0.08, 0.05), materials, collection)
+    chair_count = 4 if profile in {"family", "farmhouse", "formal"} else 2
+    chair_positions = [(-0.42, -0.08, math.radians(90)), (0.28, -0.08, -math.radians(90)), (-0.08, -0.42, 0.0), (-0.08, 0.26, math.pi)]
+    for index, (xoff, yoff, angle) in enumerate(chair_positions[:chair_count], start=1):
+        create_chair(f"{name} Chair {index}", origin, rot, (xoff, yoff, 0.05), materials, collection, angle)
+
+    create_bed(f"{name} Bed", origin, rot, (width * 0.22, depth * 0.28, 0.05), materials, collection, math.radians(90), double=profile in {"family", "formal", "farmhouse"})
+    create_chest(f"{name}", origin, rot, (-width * 0.34, depth * 0.26, 0.05), materials, collection)
+    create_shelf(f"{name} Pottery", origin, rot, (-width * 0.32, depth / 2.0 - 0.08, 0.05), materials, collection, 0.58)
+    create_fireplace(f"{name} Hearth", origin, rot, (width * 0.32, -depth / 2.0 + 0.12, 0.05), materials, collection, stove=profile in {"cottage", "coastal_hut", "rustic"})
+
+    if profile in {"family", "farmhouse", "formal"}:
+        create_table(f"{name} Kitchen Prep", origin, rot, (-width * 0.32, -depth * 0.32, 0.05), materials, collection, (0.48, 0.24, 0.07))
+        for i, xoff in enumerate((-0.18, 0.0, 0.18), start=1):
+            add_local_box(f"{name} Storage Jar {i}", origin, rot, (-width * 0.32 + xoff, -depth * 0.32, 0.48), (0.08, 0.08, 0.12), materials["clay"], collection)
+    if profile in {"work", "rustic", "coastal_work"}:
+        add_local_box(f"{name} Tool Rack", origin, rot, (-width / 2.0 + 0.08, -0.08, 0.74), (0.055, 0.58, 0.08), materials["dark_wood"], collection)
+        for i, yoff in enumerate((-0.2, 0.0, 0.2), start=1):
+            add_local_box(f"{name} Hanging Tool {i}", origin, rot, (-width / 2.0 + 0.04, yoff, 0.54), (0.04, 0.04, 0.28), materials["metal"], collection)
+    if profile in {"cottage", "stone_cottage"}:
+        add_local_box(f"{name} Woven Rug", origin, rot, (0.08, 0.05, 0.075), (0.58, 0.42, 0.025), materials["rug"], collection)
+
+
+def create_detailed_house(name: str, center, rotation_z: float, variant: dict, materials, collection: str):
+    """Create one non-repeating house and furnish its interior."""
+    house = create_house_base(
+        name,
+        center,
+        rotation_z,
+        variant["width"],
+        variant["depth"],
+        variant["wall_height"],
+        variant["roof_height"],
+        materials[variant["wall_mat"]],
+        materials[variant["roof_mat"]],
+        materials,
+        collection,
+        variant.get("roof_style", "gable"),
+        variant.get("door_offset", 0.0),
+        variant.get("door_width", 0.34),
+        variant.get("door_height", 0.68),
+        variant.get("front_windows", 2),
+        variant.get("side_extension", False),
+        variant.get("chimney", False),
+        variant.get("porch", True),
+    )
+    furnish_house_interior(name, house, materials, variant.get("interior", "family"))
+    return house
+
+
+def create_anvil(name: str, location, materials, collection: str, rotation_z: float = 0.0):
+    add_box(f"{name} Anvil Base", (location[0], location[1], location[2] + 0.14), (0.16, 0.16, 0.28), materials["metal"], rotation_z, collection)
+    add_box(f"{name} Anvil Body", (location[0], location[1], location[2] + 0.33), (0.42, 0.18, 0.12), materials["metal"], rotation_z, collection)
+    add_box(f"{name} Anvil Horn", (location[0] + math.cos(rotation_z) * 0.27, location[1] + math.sin(rotation_z) * 0.27, location[2] + 0.34), (0.2, 0.1, 0.08), materials["metal"], rotation_z, collection)
+
+
+def create_sack(name: str, location, materials, collection: str, scale: float = 1.0):
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=8, ring_count=4, radius=0.15 * scale, location=(location[0], location[1], location[2] + 0.16 * scale))
+    sack = bpy.context.object
+    sack.name = f"{name} Sack"
+    sack.scale.z *= 1.25
+    sack.data.materials.append(materials["sack"])
+    link_to_collection(sack, collection)
+
+
+def create_cart(name: str, center, rotation_z: float, materials, collection: str = "Props"):
+    z = island_height(center[0], center[1]) + 0.13
+    add_box(f"{name} Cart Bed", (center[0], center[1], z + 0.18), (0.82, 0.42, 0.16), materials["wood"], rotation_z, collection)
+    for side in (-1.0, 1.0):
+        wheel_pos = local_to_world((center[0], center[1], z), rotation_z, (-0.24, side * 0.27, 0.14))
+        bpy.ops.mesh.primitive_torus_add(major_radius=0.13, minor_radius=0.025, major_segments=12, minor_segments=4, location=wheel_pos, rotation=(math.radians(90), 0.0, rotation_z))
+        wheel = bpy.context.object
+        wheel.name = f"{name} Wooden Wheel"
+        wheel.data.materials.append(materials["dark_wood"])
+        link_to_collection(wheel, collection)
+    add_box(f"{name} Cart Handle", local_to_world((center[0], center[1], z), rotation_z, (0.48, 0.0, 0.22)), (0.55, 0.055, 0.055), materials["wood"], rotation_z, collection)
+
+
+def create_blacksmith(name: str, center, rotation_z: float, materials):
+    house = create_house_base(
+        name,
+        center,
+        rotation_z,
+        1.95,
+        1.35,
+        0.88,
+        0.36,
+        materials["wall_timber"],
+        materials["roof_gray"],
+        materials,
+        "Village_1",
+        "shed",
+        0.0,
+        0.72,
+        0.78,
+        1,
+        False,
+        True,
+        False,
+    )
+    origin = house["origin"]
+    create_fireplace(f"{name} Forge", origin, rotation_z, (-0.55, -0.46, 0.05), materials, "Interiors", False)
+    create_table(f"{name} Heavy Workbench", origin, rotation_z, (0.45, 0.26, 0.05), materials, "Interiors", (0.72, 0.34, 0.08))
+    create_anvil(f"{name} Interior", local_to_world(origin, rotation_z, (0.08, -0.18, 0.05)), materials, "Interiors", rotation_z)
+    add_local_box(f"{name} Hammer Rack", origin, rotation_z, (0.86, -0.52, 0.64), (0.52, 0.06, 0.08), materials["dark_wood"], "Interiors")
+    for i, xoff in enumerate((-0.16, 0.0, 0.16), start=1):
+        add_local_box(f"{name} Hanging Hammer {i}", origin, rotation_z, (0.86 + xoff, -0.55, 0.46), (0.045, 0.045, 0.26), materials["metal"], "Interiors")
+
+    yard = local_to_world(origin, rotation_z, (0.0, -1.04, 0.0))
+    create_anvil(f"{name} Yard", (yard[0] - 0.28, yard[1], yard[2]), materials, "Props", rotation_z)
+    add_box(f"{name} Water Trough", (yard[0] + 0.34, yard[1] - 0.08, yard[2] + 0.12), (0.56, 0.22, 0.18), materials["dark_wood"], rotation_z, "Props")
+    for i in range(5):
+        bar = local_to_world(origin, rotation_z, (-0.82 + i * 0.08, -1.08, 0.1 + i * 0.02))
+        add_box(f"{name} Stacked Metal Bar {i + 1}", bar, (0.52, 0.035, 0.035), materials["metal"], rotation_z + 0.1, "Props")
+    bpy.ops.mesh.primitive_torus_add(major_radius=0.18, minor_radius=0.035, location=local_to_world(origin, rotation_z, (0.82, -1.02, 0.23)), rotation=(math.radians(90), 0.0, rotation_z))
+    wheel = bpy.context.object
+    wheel.name = f"{name} Wagon Wheel"
+    wheel.data.materials.append(materials["dark_wood"])
+    link_to_collection(wheel, "Props")
+    return house
+
+
+def create_stable(name: str, center, rotation_z: float, materials):
+    house = create_house_base(name, center, rotation_z, 2.15, 1.45, 0.82, 0.34, materials["stable_wall"], materials["roof_brown"], materials, "Village_1", "gable", 0.0, 0.9, 0.78, 1, False, False, False)
+    origin = house["origin"]
+    for offset in (-0.42, 0.28):
+        add_local_box(f"{name} Stall Divider", origin, rotation_z, (offset, 0.08, 0.38), (0.06, 1.12, 0.62), materials["wood"], "Interiors")
+    for index, xoff in enumerate((-0.72, 0.0, 0.72), start=1):
+        add_local_box(f"{name} Hay Bale {index}", origin, rotation_z, (xoff, 0.46, 0.16), (0.38, 0.28, 0.22), materials["hay"], "Interiors")
+        add_local_box(f"{name} Stall Trough {index}", origin, rotation_z, (xoff, -0.48, 0.18), (0.42, 0.16, 0.16), materials["dark_wood"], "Interiors")
+    fence_points = []
+    for local in [(-1.25, -1.02), (-0.2, -1.25), (1.08, -1.05), (1.25, -0.25)]:
+        p = local_to_world(origin, rotation_z, (local[0], local[1], 0.0))
+        fence_points.append((p[0], p[1]))
+    create_fence(f"{name} Paddock Fence", fence_points, materials["wood"], 0.44)
+    trough = local_to_world(origin, rotation_z, (1.45, -0.52, 0.0))
+    add_box(f"{name} Outdoor Trough", (trough[0], trough[1], trough[2] + 0.12), (0.64, 0.22, 0.16), materials["dark_wood"], rotation_z, "Props")
+    return house
+
+
+def create_granary(name: str, center, rotation_z: float, materials):
+    house = create_house_base(name, center, rotation_z, 1.45, 1.1, 0.76, 0.32, materials["wall_warm"], materials["roof_brown"], materials, "Village_1", "gable", -0.12, 0.42, 0.64, 1, False, False, True)
+    origin = house["origin"]
+    for xoff in (-0.52, 0.52):
+        for yoff in (-0.38, 0.38):
+            add_local_box(f"{name} Raised Stone Pier", origin, rotation_z, (xoff, yoff, -0.05), (0.18, 0.18, 0.32), materials["rock"], "Village_1")
+    for i, pos in enumerate([(-0.38, -0.24), (-0.1, -0.18), (0.22, -0.22), (0.42, 0.14)], start=1):
+        create_sack(f"{name} Grain {i}", local_to_world(origin, rotation_z, (pos[0], pos[1], 0.05)), materials, "Interiors", 0.9)
+    for i, pos in enumerate([(-0.44, 0.36), (0.0, 0.36), (0.44, 0.36)], start=1):
+        create_prop_crate(f"{name} Storage Crate {i}", local_to_world(origin, rotation_z, (pos[0], pos[1], 0.05)), materials["crate"], materials["dark_wood"], 0.78, rotation_z)
+    add_local_box(f"{name} Farm Tool Rack", origin, rotation_z, (0.64, -0.12, 0.58), (0.06, 0.52, 0.08), materials["dark_wood"], "Interiors")
+    return house
+
+
+def create_bakehouse(name: str, center, rotation_z: float, materials):
+    house = create_house_base(name, center, rotation_z, 1.78, 1.2, 0.86, 0.34, materials["wall_warm"], materials["roof_red"], materials, "Village_1", "hip", 0.0, 0.46, 0.7, 2, False, True, True)
+    origin = house["origin"]
+    add_local_box(f"{name} Brick Oven Base", origin, rotation_z, (-0.58, 0.25, 0.22), (0.52, 0.46, 0.34), materials["clay"], "Interiors")
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=12, ring_count=6, radius=0.31, location=local_to_world(origin, rotation_z, (-0.58, 0.25, 0.55)))
+    oven = bpy.context.object
+    oven.name = f"{name} Domed Oven"
+    oven.scale.z *= 0.6
+    oven.data.materials.append(materials["clay"])
+    link_to_collection(oven, "Interiors")
+    create_table(f"{name} Flour Prep Table", origin, rotation_z, (0.25, -0.22, 0.05), materials, "Interiors", (0.82, 0.34, 0.08))
+    for i, pos in enumerate([(0.52, 0.32), (0.24, 0.32), (0.5, 0.05)], start=1):
+        create_sack(f"{name} Flour Sack {i}", local_to_world(origin, rotation_z, (pos[0], pos[1], 0.05)), materials, "Interiors", 0.78)
+    create_shelf(f"{name} Bread Shelf", origin, rotation_z, (0.0, 0.52, 0.05), materials, "Interiors", 0.9)
+    return house
+
+
+def create_fish_market(name: str, center, rotation_z: float, materials):
+    origin = (center[0], center[1], island_height(center[0], center[1]) + 0.1)
+    add_local_box(f"{name} Packed Sand Floor", origin, rotation_z, (0.0, 0.0, 0.02), (1.95, 1.22, 0.04), materials["path"], "Village_2")
+    for xoff in (-0.82, 0.82):
+        for yoff in (-0.5, 0.5):
+            add_local_box(f"{name} Timber Post", origin, rotation_z, (xoff, yoff, 0.46), (0.08, 0.08, 0.86), materials["wood"], "Village_2")
+    create_roof(f"{name} Open Shelter Roof", origin, rotation_z, 2.14, 1.42, 0.86, 0.32, materials["roof_blue"], "gable", "Village_2")
+    for i, xoff in enumerate((-0.44, 0.44), start=1):
+        create_table(f"{name} Fish Display Table {i}", origin, rotation_z, (xoff, -0.05, 0.05), materials, "Interiors", (0.62, 0.36, 0.08))
+        for fish_idx in range(3):
+            add_local_box(f"{name} Display Fish {i}-{fish_idx}", origin, rotation_z, (xoff - 0.18 + fish_idx * 0.18, -0.05, 0.43), (0.13, 0.035, 0.035), materials["fish"], "Interiors")
+    for i, local in enumerate([(-0.76, -0.62), (0.72, -0.6), (0.85, 0.48)], start=1):
+        create_prop_crate(f"{name} Market Crate {i}", local_to_world(origin, rotation_z, (local[0], local[1], 0.05)), materials["crate"], materials["dark_wood"], 0.9, rotation_z)
+    return {"origin": origin}
+
+
+def create_prop_rope(name: str, location, materials, collection: str = "Props", scale: float = 1.0):
+    bpy.ops.mesh.primitive_torus_add(major_radius=0.14 * scale, minor_radius=0.025 * scale, major_segments=18, minor_segments=6, location=location)
+    rope = bpy.context.object
+    rope.name = f"{name} Rope Coil"
+    rope.data.materials.append(materials["rope"])
+    link_to_collection(rope, collection)
+    return rope
+
+
+def create_prop_net(name: str, center, rope_material, rotation_z: float = 0.0, scale: float = 1.0):
+    return create_fishing_net(name, center, rope_material, rotation_z, scale)
+
+
+def create_net_shed(name: str, center, rotation_z: float, materials):
+    house = create_house_base(name, center, rotation_z, 1.32, 1.0, 0.68, 0.28, materials["wall_fishing"], materials["roof_gray"], materials, "Village_2", "shed", 0.0, 0.5, 0.58, 1, False, False, False)
+    origin = house["origin"]
+    create_fishing_net(f"{name} Floor Net", (center[0], center[1]), materials["rope"], rotation_z, 0.7)
+    for i, yoff in enumerate((-0.24, 0.0, 0.24), start=1):
+        add_local_box(f"{name} Hanging Net {i}", origin, rotation_z, (-0.52, yoff, 0.52), (0.035, 0.32, 0.42), materials["rope"], "Interiors")
+    for i, yoff in enumerate((-0.32, 0.0, 0.32), start=1):
+        add_local_box(f"{name} Fishing Pole {i}", origin, rotation_z, (0.52, yoff, 0.44), (0.035, 0.035, 0.76), materials["wood"], "Interiors")
+    create_prop_rope(f"{name} Interior", local_to_world(origin, rotation_z, (0.05, -0.22, 0.1)), materials, "Interiors", 0.78)
+    return house
+
+
+def create_smokehouse(name: str, center, rotation_z: float, materials):
+    house = create_house_base(name, center, rotation_z, 1.05, 0.92, 0.76, 0.26, materials["dark_wood"], materials["roof_gray"], materials, "Village_2", "gable", 0.0, 0.34, 0.58, 0, False, True, False)
+    origin = house["origin"]
+    add_local_box(f"{name} Smoke Pit", origin, rotation_z, (0.0, -0.24, 0.12), (0.34, 0.28, 0.12), materials["black"], "Interiors")
+    add_local_box(f"{name} Ember Glow", origin, rotation_z, (0.0, -0.24, 0.2), (0.22, 0.16, 0.04), materials["fire"], "Interiors")
+    for zoff in (0.46, 0.64):
+        add_local_box(f"{name} Drying Rack", origin, rotation_z, (0.0, 0.08, zoff), (0.72, 0.05, 0.04), materials["wood"], "Interiors")
+    for i, xoff in enumerate((-0.26, -0.08, 0.1, 0.28), start=1):
+        add_local_box(f"{name} Hanging Fish {i}", origin, rotation_z, (xoff, 0.08, 0.54), (0.055, 0.025, 0.22), materials["fish"], "Interiors")
+    return house
+
+
+def create_boat_workshop(name: str, center, rotation_z: float, materials):
+    origin = (center[0], center[1], island_height(center[0], center[1]) + 0.1)
+    add_local_box(f"{name} Work Yard Floor", origin, rotation_z, (0.0, 0.0, 0.02), (2.0, 1.24, 0.04), materials["path"], "Village_2")
+    for xoff in (-0.82, 0.82):
+        for yoff in (-0.5, 0.5):
+            add_local_box(f"{name} Open Shed Post", origin, rotation_z, (xoff, yoff, 0.46), (0.08, 0.08, 0.86), materials["wood"], "Village_2")
+    create_roof(f"{name} Open Shed Roof", origin, rotation_z, 2.18, 1.38, 0.82, 0.28, materials["roof_gray"], "shed", "Village_2")
+    create_table(f"{name} Tool Workbench", origin, rotation_z, (-0.52, 0.18, 0.05), materials, "Interiors", (0.74, 0.32, 0.08))
+    for i, yoff in enumerate((-0.34, -0.18, 0.0, 0.18), start=1):
+        add_local_box(f"{name} Spare Plank {i}", origin, rotation_z, (0.42, yoff, 0.13 + i * 0.025), (0.92, 0.055, 0.035), materials["wood"], "Interiors")
+    for i, xoff in enumerate((-0.28, 0.18), start=1):
+        add_local_box(f"{name} Sawhorse {i}", origin, rotation_z, (xoff, -0.38, 0.24), (0.38, 0.08, 0.2), materials["dark_wood"], "Interiors")
+    partial = local_to_world(origin, rotation_z, (0.22, -0.38, 0.42))
+    create_boat(f"{name} Partial Hull Frame", partial, rotation_z, materials["dark_wood"], materials["sail"], materials["wood"], 0.55, "rowboat")
+    return {"origin": origin}
+
+
 def create_village(name: str, center, roof_material, wall_material, door_material, window_material, path_material, materials, seed: int):
-    """Create the inland village around a square and central well."""
+    """Create Village 1: an inland settlement with a well, square, houses, and civic buildings."""
     rng = random.Random(seed)
     square_center = center
-    create_flat_patch(f"{name} Open Village Square", square_center, 2.05, 2.05, path_material, math.radians(7), 0.085, 8)
+    create_flat_patch(f"{name} Irregular Stone-Dirt Village Square", square_center, 2.55, 2.25, path_material, math.radians(7), 0.085, 8)
+    create_flat_patch(f"{name} Worn Stone Paving Around Well", square_center, 1.05, 0.9, materials["paving"], math.radians(12), 0.105, 8)
     create_well(f"{name} Central Well", square_center, materials["rock"], materials["wood"], materials["roof_thatch"], materials["bucket"])
+
+    for index, local in enumerate([(-0.72, -0.46), (0.78, 0.48)], start=1):
+        p = (center[0] + local[0], center[1] + local[1], island_height(center[0] + local[0], center[1] + local[1]) + 0.18)
+        add_box(f"{name} Square Bench {index} Seat", p, (0.58, 0.14, 0.08), materials["wood"], math.radians(8 + index * 58), "Village_1")
+    add_box(f"{name} Notice Board Post", (center[0] - 1.12, center[1] + 0.76, island_height(center[0] - 1.12, center[1] + 0.76) + 0.42), (0.08, 0.08, 0.72), materials["wood"], 0.0, "Props")
+    add_box(f"{name} Notice Board Face", (center[0] - 1.12, center[1] + 0.76, island_height(center[0] - 1.12, center[1] + 0.76) + 0.73), (0.5, 0.06, 0.34), materials["dark_wood"], math.radians(18), "Props")
+    for index, local in enumerate([(0.9, -0.58), (1.05, -0.33), (-0.95, 0.42)], start=1):
+        create_prop_barrel(f"{name} Square Bucket Barrel {index}", (center[0] + local[0], center[1] + local[1], island_height(center[0] + local[0], center[1] + local[1]) + 0.08), materials["wood"], materials["metal"], 0.6)
 
     house_points = []
     house_specs = [
-        (-0.2, 2.35, "family"),
-        (0.78, 2.15, "cottage"),
-        (1.62, 2.28, "wide"),
-        (2.38, 2.05, "tall"),
-        (3.35, 2.25, "cottage"),
-        (4.18, 2.52, "family"),
-        (5.2, 2.1, "wide"),
-        (6.05, 2.42, "cottage"),
+        ("House 1 North Family House", (0.0, 2.62), {"width": 1.42, "depth": 1.12, "wall_height": 0.88, "roof_height": 0.62, "wall_mat": "wall_plaster", "roof_mat": "roof_red", "roof_style": "gable", "door_offset": -0.08, "front_windows": 2, "side_extension": True, "chimney": True, "interior": "family"}),
+        ("House 2 Northeast Herb Cottage", (1.88, 1.78), {"width": 0.92, "depth": 1.16, "wall_height": 0.76, "roof_height": 0.48, "wall_mat": "wall_cream", "roof_mat": "roof_orange", "roof_style": "gable", "door_offset": 0.18, "front_windows": 1, "interior": "cottage"}),
+        ("House 3 East Formal House", (2.72, 0.08), {"width": 1.58, "depth": 1.22, "wall_height": 0.92, "roof_height": 0.46, "wall_mat": "wall_stone_plaster", "roof_mat": "roof_brown", "roof_style": "hip", "door_width": 0.44, "front_windows": 2, "chimney": True, "interior": "formal"}),
+        ("House 4 Southeast Road House", (2.1, -1.72), {"width": 1.18, "depth": 1.02, "wall_height": 0.76, "roof_height": 0.36, "wall_mat": "wall_yellow", "roof_mat": "roof_red_brown", "roof_style": "gable", "door_offset": 0.26, "front_windows": 1, "interior": "family"}),
+        ("House 5 South Farmhouse", (0.0, -2.72), {"width": 1.72, "depth": 1.18, "wall_height": 0.86, "roof_height": 0.54, "wall_mat": "wall_stone_plaster", "roof_mat": "roof_brown", "roof_style": "gable", "door_offset": -0.14, "front_windows": 3, "chimney": True, "interior": "farmhouse"}),
+        ("House 6 Southwest Timber House", (-2.06, -1.78), {"width": 1.22, "depth": 1.18, "wall_height": 0.8, "roof_height": 0.38, "wall_mat": "wall_timber", "roof_mat": "roof_muted", "roof_style": "shed", "door_offset": 0.18, "front_windows": 1, "side_extension": True, "interior": "work"}),
+        ("House 7 West Limewash House", (-2.78, 0.05), {"width": 1.36, "depth": 1.08, "wall_height": 0.98, "roof_height": 0.58, "wall_mat": "wall_lime", "roof_mat": "roof_red", "roof_style": "hip", "front_windows": 2, "porch": True, "interior": "formal"}),
+        ("House 8 Northwest Stone Cottage", (-1.88, 1.9), {"width": 1.02, "depth": 0.96, "wall_height": 0.72, "roof_height": 0.4, "wall_mat": "wall_stone", "roof_mat": "roof_gray_red", "roof_style": "gable", "door_offset": -0.18, "front_windows": 1, "interior": "stone_cottage"}),
     ]
 
-    for index, (angle, distance, variant) in enumerate(house_specs, start=1):
-        angle += rng.uniform(-0.12, 0.12)
-        distance += rng.uniform(-0.16, 0.16)
-        x = center[0] + math.cos(angle) * distance
-        y = center[1] + math.sin(angle) * distance
-        z = island_height(x, y) + 0.08
+    for index, (label, offset, variant) in enumerate(house_specs, start=1):
+        x = center[0] + offset[0]
+        y = center[1] + offset[1]
         dx = center[0] - x
         dy = center[1] - y
-        rotation = math.atan2(dx, -dy) + rng.uniform(-0.22, 0.22)
-        create_house_variant(f"{name} House {index}", (x, y, z), rotation, wall_material, roof_material, door_material, window_material, variant, rng)
+        rotation = math.atan2(dx, -dy) + rng.uniform(-0.06, 0.06)
+        create_detailed_house(f"{name} {label}", (x, y), rotation, variant, materials, "Village_1")
         house_points.append((x, y))
 
         mid_x = (center[0] + x) / 2.0 + rng.uniform(-0.22, 0.22)
         mid_y = (center[1] + y) / 2.0 + rng.uniform(-0.22, 0.22)
-        create_road_or_path(f"{name} Footpath {index}", [center, (mid_x, mid_y), (x, y)], 0.18, path_material, 0.09)
+        create_road_or_path(f"{name} Footpath To House {index}", [center, (mid_x, mid_y), (x, y)], 0.18, path_material, 0.09)
 
         if index in (2, 5, 7):
-            prop_x, prop_y, prop_z = local_to_world((x, y, z), rotation, (0.55, 0.55, 0.0))
-            create_prop_crate(f"{name} House {index} Crate", (prop_x, prop_y, prop_z), materials["wood"], materials["dark_wood"], 0.9, rotation)
+            prop_x, prop_y, _prop_z = local_to_world((x, y, island_height(x, y) + 0.09), rotation, (0.55, 0.55, 0.0))
+            create_prop_crate(f"{name} House {index} Crate", (prop_x, prop_y, island_height(prop_x, prop_y) + 0.09), materials["wood"], materials["dark_wood"], 0.9, rotation)
         if index in (1, 4, 8):
-            garden_x, garden_y, _garden_z = local_to_world((x, y, z), rotation, (-0.72, 0.58, 0.0))
+            garden_x, garden_y, _garden_z = local_to_world((x, y, island_height(x, y) + 0.09), rotation, (-0.72, 0.58, 0.0))
             create_garden_patch(f"{name} House {index}", (garden_x, garden_y), materials["garden_soil"], materials["garden_green"], rotation + rng.uniform(-0.15, 0.15), 0.85)
         if index in (3, 6):
-            wood_x, wood_y, wood_z = local_to_world((x, y, z), rotation, (0.7, -0.25, 0.0))
-            create_prop_woodpile(f"{name} House {index} Chopped Wood", (wood_x, wood_y, wood_z), materials["wood"], 0.9, rotation)
+            wood_x, wood_y, _wood_z = local_to_world((x, y, island_height(x, y) + 0.09), rotation, (0.7, -0.25, 0.0))
+            create_prop_woodpile(f"{name} House {index} Chopped Wood", (wood_x, wood_y, island_height(wood_x, wood_y) + 0.09), materials["wood"], 0.9, rotation)
         if index in (2, 6):
-            p1 = local_to_world((x, y, z), rotation, (-0.92, 0.82, 0.0))
-            p2 = local_to_world((x, y, z), rotation, (-0.2, 1.02, 0.0))
-            p3 = local_to_world((x, y, z), rotation, (0.48, 0.82, 0.0))
+            p1 = local_to_world((x, y, island_height(x, y) + 0.09), rotation, (-0.92, 0.82, 0.0))
+            p2 = local_to_world((x, y, island_height(x, y) + 0.09), rotation, (-0.2, 1.02, 0.0))
+            p3 = local_to_world((x, y, island_height(x, y) + 0.09), rotation, (0.48, 0.82, 0.0))
             create_fence(f"{name} House {index} Garden Fence", [(p1[0], p1[1]), (p2[0], p2[1]), (p3[0], p3[1])], materials["wood"])
+
+    blacksmith_center = (center[0] + 2.95, center[1] - 2.55)
+    stable_center = (center[0] - 2.95, center[1] - 2.3)
+    granary_center = (center[0] - 3.38, center[1] + 1.05)
+    bakehouse_center = (center[0] - 2.7, center[1] + 2.62)
+    create_blacksmith(f"{name} Blacksmith Workshop", blacksmith_center, math.radians(138), materials)
+    create_stable(f"{name} Stable", stable_center, math.radians(36), materials)
+    create_granary(f"{name} Raised Granary", granary_center, math.radians(88), materials)
+    create_bakehouse(f"{name} Communal Bakehouse", bakehouse_center, math.radians(148), materials)
+
+    for struct_index, point in enumerate([blacksmith_center, stable_center, granary_center, bakehouse_center], start=1):
+        create_road_or_path(f"{name} Path To Structure {struct_index}", [center, ((center[0] + point[0]) / 2.0, (center[1] + point[1]) / 2.0), point], 0.2, path_material, 0.09)
 
     create_road_or_path(
         f"{name} Curved Road From Square",
@@ -552,6 +1053,17 @@ def create_village(name: str, center, roof_material, wall_material, door_materia
         path_material,
         0.095,
     )
+
+    create_cart(f"{name} Small Farm Cart", (center[0] - 1.2, center[1] - 1.08), math.radians(18), materials)
+    p1 = (center[0] + 1.45, center[1] - 2.12)
+    p2 = (center[0] + 2.25, center[1] - 2.0)
+    add_box(f"{name} Laundry Post A", (p1[0], p1[1], island_height(p1[0], p1[1]) + 0.42), (0.06, 0.06, 0.72), materials["wood"], 0.0, "Props")
+    add_box(f"{name} Laundry Post B", (p2[0], p2[1], island_height(p2[0], p2[1]) + 0.42), (0.06, 0.06, 0.72), materials["wood"], 0.0, "Props")
+    add_box(f"{name} Laundry Line", ((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0, island_height((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0) + 0.78), (0.82, 0.025, 0.025), materials["rope"], math.atan2(p2[1] - p1[1], p2[0] - p1[0]), "Props")
+    for i, t in enumerate((0.25, 0.5, 0.75), start=1):
+        x = p1[0] * (1 - t) + p2[0] * t
+        y = p1[1] * (1 - t) + p2[1] * t
+        add_box(f"{name} Hanging Laundry {i}", (x, y, island_height(x, y) + 0.62), (0.16, 0.02, 0.22), materials["fabric"], math.atan2(p2[1] - p1[1], p2[0] - p1[0]), "Props")
 
     for index in range(9):
         angle = math.tau * index / 9.0 + 0.15
@@ -565,39 +1077,39 @@ def create_village(name: str, center, roof_material, wall_material, door_materia
 
 
 def create_fishing_village(name: str, center, dock_info, roof_material, wall_material, door_material, window_material, path_material, materials, seed: int):
-    """Create a practical coastal fishing village organized around the dock."""
+    """Create Village 2: a rugged fishing settlement organized around dock work."""
     rng = random.Random(seed)
     dock_shore = dock_info["shore"]
     dock_yard = dock_info["yard"]
 
-    create_flat_patch(f"{name} Sand-To-Dirt Dock Yard", dock_yard, 2.45, 1.7, materials["sand"], dock_info["rotation"], 0.09, 8)
-    create_road_or_path(f"{name} Wide Yard Track", [center, dock_yard, dock_shore], 0.46, path_material, 0.1)
+    create_flat_patch(f"{name} Pebble Cove Yard", dock_yard, 3.05, 2.15, materials["pebbles"], dock_info["rotation"], 0.09, 8)
+    create_flat_patch(f"{name} Worn Dock Work Ground", center, 2.65, 1.7, path_material, dock_info["rotation"] + 0.1, 0.105, 8)
+    create_road_or_path(f"{name} Main Dock Track", [center, dock_yard, dock_shore], 0.52, path_material, 0.1)
 
     house_specs = [
-        (-0.85, 0.72, "hut"),
-        (-0.42, 1.2, "hut"),
-        (0.02, 1.38, "workshop"),
-        (0.48, 1.08, "hut"),
-        (0.88, 0.78, "family"),
-        (1.22, 1.28, "hut"),
+        ("House 1 Dockmaster Fisher House", (-0.8, 0.82), {"width": 1.36, "depth": 1.1, "wall_height": 0.82, "roof_height": 0.42, "wall_mat": "wall_weathered_wood", "roof_mat": "roof_blue", "roof_style": "gable", "front_windows": 2, "porch": True, "interior": "coastal_work"}),
+        ("House 2 North Lean-To Cottage", (-1.55, 1.52), {"width": 0.92, "depth": 1.18, "wall_height": 0.72, "roof_height": 0.36, "wall_mat": "wall_weathered_wood", "roof_mat": "roof_green_gray", "roof_style": "shed", "door_offset": 0.2, "front_windows": 1, "side_extension": True, "chimney": True, "interior": "coastal_hut"}),
+        ("House 3 South Fishworker House", (1.35, 0.92), {"width": 1.46, "depth": 1.0, "wall_height": 0.72, "roof_height": 0.32, "wall_mat": "wall_dark_plank", "roof_mat": "roof_gray", "roof_style": "gable", "front_windows": 2, "interior": "coastal_work"}),
+        ("House 4 Inland Family House", (-0.12, 2.0), {"width": 1.48, "depth": 1.18, "wall_height": 0.86, "roof_height": 0.42, "wall_mat": "wall_fishing_plaster", "roof_mat": "roof_blue_dark", "roof_style": "hip", "front_windows": 2, "chimney": True, "interior": "family"}),
+        ("House 5 Northwest Road Cottage", (-2.18, 0.76), {"width": 1.02, "depth": 0.96, "wall_height": 0.74, "roof_height": 0.46, "wall_mat": "wall_weathered_wood", "roof_mat": "roof_green_gray", "roof_style": "gable", "front_windows": 1, "interior": "coastal_work"}),
+        ("House 6 Southeast Beach Hut", (1.95, -0.22), {"width": 0.88, "depth": 0.86, "wall_height": 0.62, "roof_height": 0.3, "wall_mat": "wall_dark_wood", "roof_mat": "roof_muted", "roof_style": "shed", "front_windows": 1, "porch": False, "interior": "coastal_hut"}),
+        ("House 7 Market House", (0.55, 1.18), {"width": 1.22, "depth": 1.0, "wall_height": 0.8, "roof_height": 0.38, "wall_mat": "wall_whitewashed", "roof_mat": "roof_blue", "roof_style": "gable", "front_windows": 2, "interior": "family"}),
     ]
     house_points = []
-    coast_target = dock_shore
+    coast_target = dock_info["end"]
 
-    for index, (side_offset, inland_offset, variant) in enumerate(house_specs, start=1):
+    for index, (label, offsets, variant) in enumerate(house_specs, start=1):
         base = Vector((dock_yard[0], dock_yard[1], 0.0))
         side = dock_info["side"]
         inward = -dock_info["direction"]
-        location_vec = base + side * side_offset + inward * inland_offset
+        location_vec = base + side * offsets[0] + inward * offsets[1]
         x = location_vec.x + rng.uniform(-0.12, 0.12)
         y = location_vec.y + rng.uniform(-0.12, 0.12)
-        z = island_height(x, y) + 0.08
         rotation = math.atan2(coast_target[0] - x, -(coast_target[1] - y)) + rng.uniform(-0.15, 0.15)
 
-        house_roof_material = roof_material if variant != "workshop" else materials["roof_gray"]
-        create_house_variant(f"{name} Shore Hut {index}", (x, y, z), rotation, wall_material, house_roof_material, door_material, window_material, variant, rng)
+        create_detailed_house(f"{name} {label}", (x, y), rotation, variant, materials, "Village_2")
         house_points.append((x, y))
-        create_road_or_path(f"{name} Hut Path {index}", [(x, y), ((x + dock_yard[0]) / 2.0, (y + dock_yard[1]) / 2.0), dock_yard], 0.16, path_material, 0.095)
+        create_road_or_path(f"{name} Path To House {index}", [(x, y), ((x + dock_yard[0]) / 2.0, (y + dock_yard[1]) / 2.0), dock_yard], 0.16, path_material, 0.095)
 
     create_road_or_path(
         f"{name} Road Toward Inland Village",
@@ -606,6 +1118,19 @@ def create_fishing_village(name: str, center, dock_info, roof_material, wall_mat
         path_material,
         0.1,
     )
+
+    fish_market_center = Vector((dock_yard[0], dock_yard[1], 0.0)) + dock_info["side"] * 0.92 - dock_info["direction"] * 0.26
+    net_shed_center = Vector((dock_yard[0], dock_yard[1], 0.0)) - dock_info["side"] * 1.16 + dock_info["direction"] * 0.1
+    smokehouse_center = Vector((dock_yard[0], dock_yard[1], 0.0)) + dock_info["side"] * 2.0 - dock_info["direction"] * 0.88
+    repair_center = Vector((dock_yard[0], dock_yard[1], 0.0)) - dock_info["side"] * 1.75 - dock_info["direction"] * 0.62
+
+    create_fish_market(f"{name} Fish Market Shelter", (fish_market_center.x, fish_market_center.y), dock_info["rotation"], materials)
+    create_net_shed(f"{name} Net Storage Shed", (net_shed_center.x, net_shed_center.y), dock_info["rail_rotation"], materials)
+    create_smokehouse(f"{name} Smokehouse Drying Hut", (smokehouse_center.x, smokehouse_center.y), dock_info["rotation"] + 0.4, materials)
+    create_boat_workshop(f"{name} Boat Repair Workshop", (repair_center.x, repair_center.y), dock_info["rail_rotation"] + 0.08, materials)
+
+    for index, point in enumerate([(fish_market_center.x, fish_market_center.y), (net_shed_center.x, net_shed_center.y), (smokehouse_center.x, smokehouse_center.y), (repair_center.x, repair_center.y)], start=1):
+        create_road_or_path(f"{name} Work Path {index}", [dock_yard, ((dock_yard[0] + point[0]) / 2.0, (dock_yard[1] + point[1]) / 2.0), point], 0.18, path_material, 0.1)
 
     prop_base = Vector((dock_yard[0], dock_yard[1], island_height(dock_yard[0], dock_yard[1]) + 0.08))
     for index, offset in enumerate((-0.54, -0.28, 0.28, 0.58), start=1):
@@ -618,6 +1143,7 @@ def create_fishing_village(name: str, center, dock_info, roof_material, wall_mat
 
     net_center = prop_base + dock_info["side"] * 0.1 - dock_info["direction"] * 0.82
     create_fishing_net(f"{name} Coiled Net", (net_center.x, net_center.y), materials["rope"], dock_info["rotation"] + 0.2, 0.92)
+    create_prop_rope(f"{name} Dock Rope Coil", (prop_base.x + dock_info["side"].x * 0.55, prop_base.y + dock_info["side"].y * 0.55, prop_base.z + 0.08), materials, "Props", 0.9)
 
     rack_center = prop_base - dock_info["side"] * 0.92 - dock_info["direction"] * 0.28
     create_fish_drying_rack(f"{name} Fish Drying Rack", (rack_center.x, rack_center.y), materials["wood"], materials["fish"], dock_info["rotation"], 1.0)
@@ -631,6 +1157,12 @@ def create_fishing_village(name: str, center, dock_info, roof_material, wall_mat
         materials["wood"],
         0.36,
     )
+
+    create_cart(f"{name} Fish Handcart", (prop_base.x - dock_info["direction"].x * 1.25, prop_base.y - dock_info["direction"].y * 1.25), dock_info["rotation"], materials)
+    for i, side_offset in enumerate((-1.0, 1.0), start=1):
+        lantern = Vector((dock_yard[0], dock_yard[1], 0.0)) + dock_info["side"] * side_offset + dock_info["direction"] * 0.62
+        add_box(f"{name} Lantern Post {i}", (lantern.x, lantern.y, island_height(lantern.x, lantern.y) + 0.56), (0.07, 0.07, 0.9), materials["wood"], 0.0, "Props")
+        add_box(f"{name} Lantern Box {i}", (lantern.x, lantern.y, island_height(lantern.x, lantern.y) + 1.04), (0.16, 0.16, 0.18), materials["lantern"], 0.0, "Props")
 
     for index in range(7):
         angle = math.tau * index / 7.0 + 0.2
@@ -679,10 +1211,15 @@ def create_boat(name: str, location, rotation_z: float, hull_material, sail_mate
     hull = bpy.data.objects.new(f"{name} Hull", mesh)
     bpy.context.collection.objects.link(hull)
     hull.data.materials.append(hull_material)
+    link_to_collection(hull, "Boats")
 
-    add_box(f"{name} Interior Floor", local_to_world(location, rotation_z, (-0.04 * scale, 0.0, -height * 0.38)), (length * 0.62, width * 0.36, 0.045 * scale), mast_material, rotation_z)
+    add_box(f"{name} Interior Floor", local_to_world(location, rotation_z, (-0.04 * scale, 0.0, -height * 0.38)), (length * 0.62, width * 0.36, 0.045 * scale), mast_material, rotation_z, "Boats")
     for seat_x in (-0.26, 0.16):
-        add_box(f"{name} Wooden Seat", local_to_world(location, rotation_z, (seat_x * length, 0.0, rim_z + 0.04 * scale)), (0.07 * scale, width * 0.68, 0.055 * scale), mast_material, rotation_z)
+        add_box(f"{name} Wooden Seat", local_to_world(location, rotation_z, (seat_x * length, 0.0, rim_z + 0.04 * scale)), (0.07 * scale, width * 0.68, 0.055 * scale), mast_material, rotation_z, "Boats")
+    for rib_x in (-0.34, -0.1, 0.14, 0.34):
+        add_box(f"{name} Interior Rib", local_to_world(location, rotation_z, (rib_x * length, 0.0, -height * 0.08)), (0.045 * scale, width * 0.72, 0.045 * scale), mast_material, rotation_z, "Boats")
+    add_box(f"{name} Raised Bow Cap", local_to_world(location, rotation_z, (length * 0.48, 0.0, rim_z + 0.08 * scale)), (0.16 * scale, 0.22 * scale, 0.08 * scale), mast_material, rotation_z, "Boats")
+    add_box(f"{name} Flat Stern Board", local_to_world(location, rotation_z, (-length * 0.46, 0.0, rim_z + 0.04 * scale)), (0.08 * scale, width * 0.68, 0.12 * scale), mast_material, rotation_z, "Boats")
 
     if boat_type in {"fishing", "sail"}:
         mast_height = 0.86 * scale
@@ -691,6 +1228,7 @@ def create_boat(name: str, location, rotation_z: float, hull_material, sail_mate
         mast = bpy.context.object
         mast.name = f"{name} Mast"
         mast.data.materials.append(mast_material)
+        link_to_collection(mast, "Boats")
 
         sail_vertices = [
             local_to_world(location, rotation_z, (-0.02 * scale, 0.0, 0.18 * scale)),
@@ -703,21 +1241,29 @@ def create_boat(name: str, location, rotation_z: float, hull_material, sail_mate
         sail = bpy.data.objects.new(f"{name} Sail", sail_mesh)
         bpy.context.collection.objects.link(sail)
         sail.data.materials.append(sail_material)
+        link_to_collection(sail, "Boats")
+
+        if boat_type == "sail":
+            add_box(f"{name} Furled Sail Wrap", local_to_world(location, rotation_z, (0.18 * scale, 0.0, 0.62 * scale)), (0.56 * scale, 0.06 * scale, 0.08 * scale), sail_material, rotation_z, "Boats")
+            add_box(f"{name} Rudder", local_to_world(location, rotation_z, (-length * 0.54, 0.0, -height * 0.15)), (0.06 * scale, 0.18 * scale, 0.28 * scale), mast_material, rotation_z, "Boats")
 
     if boat_type in {"fishing", "rowboat"}:
         for side in (-1.0, 1.0):
             oar_center = local_to_world(location, rotation_z, (-0.08 * scale, side * width * 0.56, rim_z + 0.02 * scale))
-            add_box(f"{name} Oar", oar_center, (length * 0.5, 0.035 * scale, 0.035 * scale), mast_material, rotation_z + side * math.radians(16))
+            add_box(f"{name} Oar", oar_center, (length * 0.5, 0.035 * scale, 0.035 * scale), mast_material, rotation_z + side * math.radians(16), "Boats")
 
     if boat_type == "fishing":
         gear_location = local_to_world(location, rotation_z, (-length * 0.25, 0.0, rim_z + 0.1 * scale))
         create_prop_crate(f"{name} Gear Crate", gear_location, mast_material, hull_material, 0.55, rotation_z)
+        create_prop_rope(f"{name} Rope", local_to_world(location, rotation_z, (length * 0.1, width * 0.18, rim_z + 0.12 * scale)), {"rope": sail_material}, "Boats", 0.42)
+        for index, yoff in enumerate((-0.11, 0.02, 0.15), start=1):
+            add_box(f"{name} Folded Net Strand {index}", local_to_world(location, rotation_z, (length * 0.24, yoff * scale, rim_z + 0.12 * scale)), (0.34 * scale, 0.025 * scale, 0.025 * scale), sail_material, rotation_z + 0.2, "Boats")
 
     return hull
 
 
 def create_ocean(material):
-    add_box("Large Low-Poly Ocean Plane", (0.0, 0.0, -0.115), (46.0, 36.0, 0.035), material, 0.0)
+    add_box("Large Ocean Plane", (0.0, 0.0, -0.115), (46.0, 36.0, 0.035), material, 0.0, "Island")
 
 
 def create_island_terrain(grass_material, sand_material, cliff_material, foam_material):
@@ -768,6 +1314,7 @@ def create_island_terrain(grass_material, sand_material, cliff_material, foam_ma
     island = bpy.data.objects.new("Main Island - Grass Hills and Beach", mesh)
     bpy.context.collection.objects.link(island)
     island.data.materials.append(grass_material)
+    link_to_collection(island, "Island")
     island.data.materials.append(sand_material)
     for polygon, material_index in zip(island.data.polygons, material_indices):
         polygon.material_index = material_index
@@ -793,6 +1340,7 @@ def create_island_terrain(grass_material, sand_material, cliff_material, foam_ma
     cliff = bpy.data.objects.new("Short Coastal Cliff Skirt", cliff_mesh)
     bpy.context.collection.objects.link(cliff)
     cliff.data.materials.append(cliff_material)
+    link_to_collection(cliff, "Island")
 
     foam_vertices = []
     foam_faces = []
@@ -814,6 +1362,7 @@ def create_island_terrain(grass_material, sand_material, cliff_material, foam_ma
     foam = bpy.data.objects.new("Thin Surf Ring Around Island", foam_mesh)
     bpy.context.collection.objects.link(foam)
     foam.data.materials.append(foam_material)
+    link_to_collection(foam, "Island")
 
     return island
 
@@ -829,9 +1378,10 @@ def create_rocks(rock_material):
         rock.name = f"Coastal Low-Poly Rock {index + 1}"
         rock.scale.z *= random.uniform(0.45, 0.9)
         rock.data.materials.append(rock_material)
+        link_to_collection(rock, "Props")
 
 
-def create_dock(wood_material, shore_angle: float = -0.62):
+def create_dock(wood_material, materials=None, shore_angle: float = -0.62):
     """Create a larger working dock and return useful shoreline anchors."""
     shore_x, shore_y = organic_point(shore_angle, 0.96)
     direction = Vector((shore_x, shore_y, 0.0)).normalized()
@@ -849,6 +1399,7 @@ def create_dock(wood_material, shore_angle: float = -0.62):
             (1.42, 0.28, 0.08),
             wood_material,
             plank_rotation,
+            "Village_2",
         )
 
     platform_center = start + direction * 3.55
@@ -860,6 +1411,7 @@ def create_dock(wood_material, shore_angle: float = -0.62):
             (1.85, 0.26, 0.08),
             wood_material,
             plank_rotation,
+            "Village_2",
         )
 
     for index in (0, 2, 4, 6, 8, 10):
@@ -870,6 +1422,7 @@ def create_dock(wood_material, shore_angle: float = -0.62):
             obj = bpy.context.object
             obj.name = "Fishing Dock Support Post"
             obj.data.materials.append(wood_material)
+            link_to_collection(obj, "Village_2")
 
     for sign in (-1.0, 1.0):
         rail_center = start + direction * 1.58 + side * sign * 0.69
@@ -879,7 +1432,28 @@ def create_dock(wood_material, shore_angle: float = -0.62):
             (3.2, 0.055, 0.055),
             wood_material,
             rail_rotation,
+            "Village_2",
         )
+
+    for index, offset in enumerate((-0.58, 0.58), start=1):
+        mooring = platform_center + side * offset
+        bpy.ops.mesh.primitive_cylinder_add(vertices=8, radius=0.075, depth=0.52, location=(mooring.x, mooring.y, deck_z + 0.22))
+        post = bpy.context.object
+        post.name = f"Fishing Dock Mooring Post {index}"
+        post.data.materials.append(wood_material)
+        link_to_collection(post, "Village_2")
+
+    ladder_center = start + direction * 2.25 + side * 0.74
+    add_box("Fishing Dock Ladder Rail A", (ladder_center.x, ladder_center.y, deck_z - 0.18), (0.05, 0.05, 0.62), wood_material, rail_rotation, "Village_2")
+    add_box("Fishing Dock Ladder Rail B", (ladder_center.x + side.x * 0.18, ladder_center.y + side.y * 0.18, deck_z - 0.18), (0.05, 0.05, 0.62), wood_material, rail_rotation, "Village_2")
+    for step in range(3):
+        rung = ladder_center + side * 0.09
+        add_box(f"Fishing Dock Ladder Rung {step + 1}", (rung.x, rung.y, deck_z - 0.36 + step * 0.17), (0.24, 0.035, 0.035), wood_material, plank_rotation, "Village_2")
+
+    if materials:
+        create_prop_crate("Fishing Dock Working Crate", (platform_center.x + side.x * 0.38, platform_center.y + side.y * 0.38, deck_z + 0.08), materials["crate"], materials["dark_wood"], 0.84, plank_rotation)
+        create_prop_barrel("Fishing Dock Salt Barrel", (platform_center.x - side.x * 0.42, platform_center.y - side.y * 0.42, deck_z + 0.08), materials["wood"], materials["metal"], 0.78)
+        create_prop_rope("Fishing Dock Mooring", (platform_center.x, platform_center.y, deck_z + 0.1), materials, "Props", 0.85)
 
     land_yard = organic_point(shore_angle, 0.82)
     return {
@@ -996,6 +1570,8 @@ def main():
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
     clear_scene()
+    COLLECTIONS.clear()
+    create_scene_collections()
 
     materials = {
         "ocean": create_material("Deep Teal Ocean", (0.05, 0.32, 0.48, 1.0), 0.55),
@@ -1007,10 +1583,30 @@ def main():
         "wall_warm": create_material("Village Cream Walls", (0.78, 0.68, 0.53, 1.0), 0.85),
         "wall_cool": create_material("Village Pale Stone Walls", (0.66, 0.70, 0.68, 1.0), 0.85),
         "wall_fishing": create_material("Fishing Village Weathered Walls", (0.58, 0.62, 0.59, 1.0), 0.88),
+        "wall_plaster": create_material("Light Beige Plaster Walls", (0.83, 0.78, 0.65, 1.0), 0.86),
+        "wall_cream": create_material("Cream Cottage Plaster", (0.88, 0.8, 0.62, 1.0), 0.86),
+        "wall_stone_plaster": create_material("Stone And Plaster Walls", (0.68, 0.64, 0.54, 1.0), 0.9),
+        "wall_yellow": create_material("Pale Yellow Plaster", (0.86, 0.76, 0.46, 1.0), 0.86),
+        "wall_timber": create_material("Dark Timber Framed Walls", (0.42, 0.32, 0.24, 1.0), 0.88),
+        "wall_lime": create_material("Pale Limewash Walls", (0.78, 0.84, 0.66, 1.0), 0.86),
+        "wall_stone": create_material("Rough Stone Cottage Walls", (0.5, 0.49, 0.44, 1.0), 0.9),
+        "wall_weathered_wood": create_material("Weathered Coastal Boards", (0.48, 0.52, 0.5, 1.0), 0.9),
+        "wall_dark_plank": create_material("Dark Rough Timber Planks", (0.28, 0.24, 0.2, 1.0), 0.9),
+        "wall_fishing_plaster": create_material("Weathered Fishing Plaster", (0.68, 0.7, 0.64, 1.0), 0.88),
+        "wall_dark_wood": create_material("Dark Coastal Hut Wood", (0.22, 0.18, 0.14, 1.0), 0.9),
+        "wall_whitewashed": create_material("Whitewashed Coastal Walls", (0.82, 0.84, 0.78, 1.0), 0.86),
+        "stable_wall": create_material("Stable Warm Timber Walls", (0.45, 0.3, 0.18, 1.0), 0.9),
         "roof_red": create_material("Village One Red Brown Roofs", (0.54, 0.18, 0.11, 1.0), 0.86),
         "roof_blue": create_material("Village Two Slate Blue Roofs", (0.19, 0.27, 0.36, 1.0), 0.86),
         "roof_gray": create_material("Fishing Workshop Dark Gray Roof", (0.15, 0.18, 0.2, 1.0), 0.86),
         "roof_thatch": create_material("Warm Wooden Well Roof", (0.62, 0.42, 0.18, 1.0), 0.88),
+        "roof_orange": create_material("Orange Red Clay Roof", (0.72, 0.28, 0.12, 1.0), 0.86),
+        "roof_red_brown": create_material("Muted Red Brown Roof", (0.46, 0.18, 0.1, 1.0), 0.86),
+        "roof_brown": create_material("Warm Brown Roof", (0.34, 0.2, 0.1, 1.0), 0.86),
+        "roof_muted": create_material("Muted Rustic Roof", (0.29, 0.28, 0.24, 1.0), 0.88),
+        "roof_gray_red": create_material("Gray Red Handmade Roof", (0.36, 0.22, 0.2, 1.0), 0.88),
+        "roof_green_gray": create_material("Green Gray Coastal Roof", (0.22, 0.33, 0.3, 1.0), 0.88),
+        "roof_blue_dark": create_material("Dark Slate Blue Roof", (0.13, 0.2, 0.3, 1.0), 0.86),
         "door": create_material("Dark Wooden Doors", (0.25, 0.14, 0.08, 1.0), 0.82),
         "window": create_material("Soft Blue Windows", (0.55, 0.78, 0.93, 1.0), 0.35),
         "trunk": create_material("Tree Trunks", (0.34, 0.20, 0.10, 1.0), 0.82),
@@ -1024,6 +1620,19 @@ def main():
         "garden_green": create_material("Garden Sprout Rows", (0.16, 0.48, 0.18, 1.0), 0.9),
         "rope": create_material("Fishing Net Rope", (0.74, 0.66, 0.48, 1.0), 0.8),
         "fish": create_material("Dried Fish Ochre", (0.76, 0.48, 0.22, 1.0), 0.78),
+        "floor": create_material("Interior Wooden Floors", (0.48, 0.31, 0.16, 1.0), 0.84),
+        "fabric": create_material("Warm Homespun Fabric", (0.56, 0.28, 0.24, 1.0), 0.82),
+        "pillow": create_material("Pale Pillow Fabric", (0.86, 0.82, 0.72, 1.0), 0.82),
+        "rug": create_material("Woven Rug Fabric", (0.38, 0.22, 0.42, 1.0), 0.88),
+        "clay": create_material("Clay Pottery And Oven", (0.62, 0.34, 0.18, 1.0), 0.86),
+        "fire": create_material("Warm Fire Glow", (1.0, 0.34, 0.08, 1.0), 0.35),
+        "black": create_material("Soot Black Iron", (0.04, 0.04, 0.035, 1.0), 0.58),
+        "sack": create_material("Burlap Grain Sacks", (0.66, 0.52, 0.34, 1.0), 0.9),
+        "hay": create_material("Golden Hay Bales", (0.84, 0.62, 0.24, 1.0), 0.9),
+        "paving": create_material("Worn Village Stone Paving", (0.48, 0.45, 0.38, 1.0), 0.92),
+        "pebbles": create_material("Pebbly Cove Ground", (0.56, 0.54, 0.47, 1.0), 0.9),
+        "lantern": create_material("Warm Lantern Glass", (1.0, 0.72, 0.28, 1.0), 0.35),
+        "flower": create_material("Tiny Flower Box Blooms", (0.78, 0.2, 0.3, 1.0), 0.88),
         "boat_hull": create_material("Small Boat Hulls", (0.36, 0.17, 0.10, 1.0), 0.78),
         "sail": create_material("Plain Canvas Sails", (0.92, 0.86, 0.68, 1.0), 0.7),
         "rock": create_material("Coastal Rock", (0.42, 0.43, 0.39, 1.0), 0.86),
@@ -1033,7 +1642,7 @@ def main():
     create_island_terrain(materials["grass"], materials["sand"], materials["cliff"], materials["foam"])
 
     inland_village_center = (-2.35, -0.45)
-    dock_info = create_dock(materials["wood"], shore_angle=-0.62)
+    dock_info = create_dock(materials["wood"], materials, shore_angle=-0.62)
     fishing_center_vec = Vector((dock_info["yard"][0], dock_info["yard"][1], 0.0)) - dock_info["direction"] * 0.75
     fishing_village_center = (fishing_center_vec.x, fishing_center_vec.y)
 
@@ -1096,16 +1705,17 @@ def main():
         rock.data.materials.append(materials["rock"])
 
     boat_specs = [
-        (dock_info["shore"], 1.65, 0.9, "fishing", 1.05),
-        (dock_info["shore"], 2.65, -0.95, "rowboat", 0.92),
-        (dock_info["end"], 0.25, 1.25, "sail", 1.0),
-        (dock_info["end"], 0.85, -1.35, "fishing", 0.88),
+        ("Boat 1 Main Fishing Boat Moored At Dock", dock_info["shore"], 1.42, 0.88, "fishing", 1.28, "water"),
+        ("Boat 2 Smaller Fishing Boat Tied To Side Post", dock_info["end"], 0.28, -1.12, "fishing", 0.95, "water"),
+        ("Boat 3 Utility Rowboat Pulled On Shore", dock_info["yard"], -0.48, 1.82, "rowboat", 0.86, "shore"),
+        ("Boat 4 Small Coastal Sailboat Anchored In Cove", dock_info["end"], 1.72, 1.35, "sail", 1.08, "water"),
     ]
-    for index, (anchor, forward, side_offset, boat_type, scale) in enumerate(boat_specs, start=1):
+    for index, (boat_name, anchor, forward, side_offset, boat_type, scale, placement) in enumerate(boat_specs, start=1):
         boat_center = Vector((anchor[0], anchor[1], 0.0)) + dock_info["direction"] * forward + dock_info["side"] * side_offset
+        boat_z = island_height(boat_center.x, boat_center.y) + 0.28 if placement == "shore" else 0.02
         create_boat(
-            f"Tidepost {boat_type.title()} Boat {index}",
-            (boat_center.x, boat_center.y, 0.02),
+            f"Tidepost {boat_name}",
+            (boat_center.x, boat_center.y, boat_z),
             dock_info["rail_rotation"] + random.uniform(-0.12, 0.12),
             materials["boat_hull"],
             materials["sail"],
