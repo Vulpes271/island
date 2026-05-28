@@ -1,0 +1,2 @@
+# No external Python packages are required.
+# The scene is generated entirely with Blender's built-in Python API.

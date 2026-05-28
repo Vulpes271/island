@@ -1,0 +1,42 @@
+# Blender temporary and backup files
+*.blend1
+*.blend2
+*.blend3
+*.blend@
+*.autosave.blend
+*.tmp
+
+# Blender and render caches
+blendcache_*/
+cache/
+*.cache
+*.bphys
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Generated outputs can be large. Uncomment these if you do not want to commit them.
+# output/*.blend
+# output/*.glb
